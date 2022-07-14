@@ -1040,7 +1040,9 @@ class core_t {
         virtual bool warp_waiting_at_barrier( unsigned warp_id ) const = 0;
         virtual void checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t, unsigned tid)=0;
         class gpgpu_sim * get_gpu() {return m_gpu;}
-        void execute_warp_inst_t(warp_inst_t &inst, unsigned warpId =(unsigned)-1);
+        void execute_warp_inst_t(warp_inst_t &inst, bool isOoO, unsigned warpId =(unsigned)-1);
+        void execute_warp_inst_t_update(warp_inst_t &inst, unsigned warpId =(unsigned)-1);
+        bool check_exit(unsigned warpId, address_type pc);
         bool  ptx_thread_done( unsigned hw_thread_id ) const ;
         void updateSIMTStack(unsigned warpId, warp_inst_t * inst);
         void initilizeSIMTStack(unsigned warp_count, unsigned warps_size);

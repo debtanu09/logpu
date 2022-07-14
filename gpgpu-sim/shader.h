@@ -107,7 +107,12 @@ public:
         m_done_exit=true;
         m_last_fetch=0;
         m_next=0;
+        m_fill=0;
         m_inst_at_barrier=NULL;
+        isOoO = false;
+        OoO_inst = NULL;
+        flush_flag=false;
+        dont_decode=false;
     }
     void init( address_type start_pc,
                unsigned cta_id,
@@ -119,11 +124,18 @@ public:
         m_warp_id=wid;
         m_dynamic_warp_id=dynamic_warp_id;
         m_next_pc=start_pc;
+        m_fetch_pc=start_pc;
         assert( n_completed >= active.count() );
         assert( n_completed <= m_warp_size);
         n_completed   -= active.count(); // active threads are not yet completed
         m_active_threads = active;
         m_done_exit=false;
+        isOoO = false;
+        OoO_inst = NULL;
+        dont_decode=false;
+        m_fill=0;
+        m_next=0;
+        flush_flag=false;
     }
 
     bool functional_done() const;
@@ -155,16 +167,29 @@ public:
     bool get_membar() const { return m_membar; }
     address_type get_pc() const { return m_next_pc; }
     void set_next_pc( address_type pc ) { m_next_pc = pc; }
+    address_type get_fetch_pc() const { return m_fetch_pc; };
+    void set_next_fetch_pc( address_type pc ) { m_fetch_pc = pc; }
 
     void store_info_of_last_inst_at_barrier(const warp_inst_t *pI){ m_inst_at_barrier = pI;}
     const warp_inst_t * restore_info_of_last_inst_at_barrier(){ return m_inst_at_barrier;}
 
     void ibuffer_fill( unsigned slot, const warp_inst_t *pI )
     {
-       assert(slot < IBUFFER_SIZE );
-       m_ibuffer[slot].m_inst=pI;
-       m_ibuffer[slot].m_valid=true;
-       m_next=0; 
+        // printf("0:%i,1:%i,2:%i,3:%i,4:%i,5:%i,6:%i,7:%i,m_next:%i,m_fill:%i,isOoO:%i,m_OoO:%i\n",m_ibuffer[0].m_valid,m_ibuffer[1].m_valid,m_ibuffer[2].m_valid,m_ibuffer[3].m_valid,m_ibuffer[4].m_valid,m_ibuffer[5].m_valid,m_ibuffer[6].m_valid,m_ibuffer[7].m_valid,m_next,m_fill,isOoO,m_OoO);
+        // assert(slot < IBUFFER_SIZE );
+        if(pI)
+            assert(m_fetch_pc == pI->pc);
+        m_ibuffer[m_fill].m_inst=pI;
+        m_ibuffer[m_fill].m_valid=true;
+        // m_next=0;
+        m_fill=(m_fill+1)%IBUFFER_SIZE;
+        if(pI)
+            m_fetch_pc = pI->pc + pI->isize;
+        // assert(slot < IBUFFER_SIZE );
+        // m_ibuffer[slot].m_inst=pI;
+        // m_ibuffer[slot].m_valid=true;
+        flush_flag=false;
+        // m_next=0;
     }
     bool ibuffer_empty() const
     {
@@ -173,23 +198,187 @@ public:
                 return false;
         return true;
     }
+    bool ibuffer_partial_empty() const
+    {
+        for( unsigned i=0; i < 2; i++) 
+            if(m_ibuffer[(m_fill+i)%IBUFFER_SIZE].m_valid) 
+                return false;
+        // if(m_ibuffer[(m_fill+IBUFFER_SIZE-1)%IBUFFER_SIZE].m_valid)
+        //     if(m_ibuffer[(m_fill+IBUFFER_SIZE-1)%IBUFFER_SIZE].m_inst)
+        //         if(m_ibuffer[(m_fill+IBUFFER_SIZE-1)%IBUFFER_SIZE].m_inst->op >= BRANCH_OP)
+        //             return false;
+        return true;
+    }
     void ibuffer_flush()
     {
+        // printf("Flush, m_next:%i\n",m_next);
         for(unsigned i=0;i<IBUFFER_SIZE;i++) {
             if( m_ibuffer[i].m_valid )
                 dec_inst_in_pipeline();
             m_ibuffer[i].m_inst=NULL; 
             m_ibuffer[i].m_valid=false; 
         }
+        flush_flag=true;
+        m_fill=0;
+        m_next=0;
+        if(isOoO)
+            assert(0);
     }
     const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_next].m_inst; }
     bool ibuffer_next_valid() { return m_ibuffer[m_next].m_valid; }
+    const warp_inst_t *ibuffer_next_inst_OoO()
+    {
+        if(isOoO)
+        {
+           //OoO_inst = NULL;
+           return NULL;
+        }
+        if(m_ibuffer[m_next].m_valid)
+        {
+            for (unsigned int i = 1; i < IBUFFER_SIZE /**&& m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_inst->op <= 5*/; i++)
+            {
+                bool noCollision = true;
+                if(m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_valid)
+                {
+                    inst2 = m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_inst;
+                    if(inst2)
+                    {
+                        if(inst2->op <= 4 /*&& inst2->op == 5*/ )
+                        {
+                            // Get list of all input and output registers (Checking for collision)
+                            std::set<int> inst1_regs;
+                            std::set<int> inst2_regs;
+                            // Read before write type of hazard
+                            if(inst2->in[0] > 0) inst2_regs.insert(inst2->in[0]);
+                            if(inst2->in[1] > 0) inst2_regs.insert(inst2->in[1]);
+                            if(inst2->in[2] > 0) inst2_regs.insert(inst2->in[2]);
+                            if(inst2->in[3] > 0) inst2_regs.insert(inst2->in[3]);
+                            if(inst2->pred > 0) inst2_regs.insert(inst2->pred);
+                            if(inst2->ar1 > 0) inst2_regs.insert(inst2->ar1);
+                            if(inst2->ar2 > 0) inst2_regs.insert(inst2->ar2);
+                            // WAW Hazard
+                            if(inst2->out[0] > 0) inst2_regs.insert(inst2->out[0]);
+                            if(inst2->out[1] > 0) inst2_regs.insert(inst2->out[1]);
+                            if(inst2->out[2] > 0) inst2_regs.insert(inst2->out[2]);
+                            if(inst2->out[3] > 0) inst2_regs.insert(inst2->out[3]);
+
+                            std::set<int> inst3_regs;
+                            std::set<int> inst4_regs;
+                            // RAW Hazard
+                            if(inst2->out[0] > 0) inst4_regs.insert(inst2->out[0]);
+                            if(inst2->out[1] > 0) inst4_regs.insert(inst2->out[1]);
+                            if(inst2->out[2] > 0) inst4_regs.insert(inst2->out[2]);
+                            if(inst2->out[3] > 0) inst4_regs.insert(inst2->out[3]);
+                            
+                            for(unsigned int j = 0; j < i; j++)
+                            {
+                                if(!m_ibuffer[(m_next+j)%IBUFFER_SIZE].m_valid)
+                                    return  NULL;
+                                // printf("0:%p, 1:%p, 2:%p, 3:%p m_next:%i m_fill:%i\n",m_ibuffer[0].m_inst,m_ibuffer[1].m_inst,m_ibuffer[2].m_inst,m_ibuffer[3].m_inst,m_next,m_fill);
+                                inst1 = m_ibuffer[(m_next+j)%IBUFFER_SIZE].m_inst;
+                                
+                                if(inst1)
+                                {
+                                    if((inst2->op == STORE_OP && inst1->op == STORE_OP) || (inst2->op == LOAD_OP && inst1->op == STORE_OP))
+                                        noCollision = false;
+                                    if(inst1->op <= 10 && inst1->op >= 6)
+                                        return NULL;
+                                    // ar1 and ar2 are arguements from the instruction
+                                    if(inst1->out[0] > 0) inst1_regs.insert(inst1->out[0]);
+                                    if(inst1->out[1] > 0) inst1_regs.insert(inst1->out[1]);
+                                    if(inst1->out[2] > 0) inst1_regs.insert(inst1->out[2]);
+                                    if(inst1->out[3] > 0) inst1_regs.insert(inst1->out[3]);
+                                    
+                                    if(inst1->pred > 0) inst1_regs.insert(inst1->pred);
+                                    if(inst1->ar1 > 0) inst1_regs.insert(inst1->ar1);
+                                    if(inst1->ar2 > 0) inst1_regs.insert(inst1->ar2);
+                                    std::set<int>::const_iterator it1;
+                                    std::set<int>::const_iterator it2;
+
+                                    // For now check for any kind of dependence and later check for RAW type of dependence only
+                                    for ( it1=inst1_regs.begin() ; it1 != inst1_regs.end(); it1++ )
+                                    {
+                                        for ( it2=inst2_regs.begin() ; it2 != inst2_regs.end(); it2++ )
+                                        {
+                                            if(*it2 == *it1) 
+                                            {
+                                                noCollision =  false;
+                                            }
+                                        }
+                                    }
+                                    // Later this can be replaced by register renaming
+                                    if(inst1->in[0] > 0) inst3_regs.insert(inst1->in[0]);
+                                    if(inst1->in[1] > 0) inst3_regs.insert(inst1->in[1]);
+                                    if(inst1->in[2] > 0) inst3_regs.insert(inst1->in[2]);
+                                    if(inst1->in[3] > 0) inst3_regs.insert(inst1->in[3]);
+                                    if(inst1->pred > 0) inst3_regs.insert(inst1->pred);
+                                    if(inst1->ar1 > 0) inst3_regs.insert(inst1->ar1);
+                                    if(inst1->ar2 > 0) inst3_regs.insert(inst1->ar2);
+                                    for ( it1=inst3_regs.begin() ; it1 != inst3_regs.end(); it1++ )
+                                    {
+                                        for ( it2=inst4_regs.begin() ; it2 != inst4_regs.end(); it2++ )
+                                        {
+                                            if(*it2 == *it1) {
+                                                noCollision =  false;
+                                            }
+                                        }
+                                    }
+                                    
+                                }
+                                // free((void *)inst1);
+                            }
+                            if(noCollision == true)
+                            {
+                                isOoO = true;
+                                m_OoO = (m_next+i)%IBUFFER_SIZE;
+                                OoO_inst = m_ibuffer[m_OoO].m_inst;
+                                return m_ibuffer[m_next].m_inst;        // We return the original value
+                            }
+                            inst1_regs.clear();
+                            inst2_regs.clear();
+                            inst3_regs.clear();
+                            inst4_regs.clear();
+                        }
+                        else
+                        {
+                            
+                            break;
+                        }
+                    }
+                    // free((void *)inst2);
+                }
+            }
+        }
+        //OoO_inst = NULL;
+        return NULL; 
+    }
     void ibuffer_free()
     {
+        // printf("0:%i,1:%i,2:%i,3:%i,4:%i,5:%i,6:%i,7:%i,m_next:%i,m_fill:%i,isOoO:%i,m_OoO:%i\n",m_ibuffer[0].m_valid,m_ibuffer[1].m_valid,m_ibuffer[2].m_valid,m_ibuffer[3].m_valid,m_ibuffer[4].m_valid,m_ibuffer[5].m_valid,m_ibuffer[6].m_valid,m_ibuffer[7].m_valid,m_next,m_fill,isOoO,m_OoO);
         m_ibuffer[m_next].m_inst = NULL;
         m_ibuffer[m_next].m_valid = false;
     }
-    void ibuffer_step() { m_next = (m_next+1)%IBUFFER_SIZE; }
+    void ibuffer_free_OoO()
+    {
+        m_ibuffer[m_OoO].m_inst = NULL;
+        m_ibuffer[m_OoO].m_valid = false;
+    }
+    void revert_to_in_order()
+    {
+        isOoO = false;
+    }
+    void clear_decode()
+    {
+        dont_decode = true;
+    }
+    void ibuffer_step() 
+    {
+        // printf("Step\n");
+        if(!flush_flag) 
+            m_next=(m_next+1)%IBUFFER_SIZE;
+        else
+            m_next=0;
+    }
 
     bool imiss_pending() const { return m_imiss_pending; }
     void set_imiss_pending() { m_imiss_pending=true; }
@@ -239,6 +428,7 @@ private:
     unsigned m_dynamic_warp_id;
 
     address_type m_next_pc;
+    address_type m_fetch_pc;
     unsigned n_completed;          // number of threads in warp completed
     std::bitset<MAX_WARP_SIZE> m_active_threads;
 
@@ -253,6 +443,7 @@ private:
     const warp_inst_t *m_inst_at_barrier;
     ibuffer_entry m_ibuffer[IBUFFER_SIZE]; 
     unsigned m_next;
+    unsigned m_fill;
                                    
     unsigned m_n_atomic;           // number of outstanding atomic operations 
     bool     m_membar;             // if true, warp is waiting at memory barrier
@@ -263,6 +454,16 @@ private:
 
     unsigned m_stores_outstanding; // number of store requests sent but not yet acknowledged
     unsigned m_inst_in_pipeline;
+
+    bool flush_flag;
+
+public:
+    bool dont_decode;
+    bool isOoO;
+    const warp_inst_t* OoO_inst;
+    const class inst_t *inst2;
+    const class inst_t *inst1;
+    unsigned m_OoO;
 };
 
 
@@ -362,6 +563,9 @@ protected:
     virtual void do_on_warp_issued( unsigned warp_id,
                                     unsigned num_issued,
                                     const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
+    virtual void do_on_warp_issued_OoO( unsigned warp_id,
+                                        unsigned num_issued,
+                                        const std::vector< shd_warp_t* >::const_iterator& prioritized_iter );
     inline int get_sid() const;
 protected:
     shd_warp_t& warp(int i);
@@ -1454,8 +1658,8 @@ public:
         m_write_regfile_acesses= (unsigned*) calloc(config->num_shader(),sizeof(unsigned));
         m_non_rf_operands=(unsigned*) calloc(config->num_shader(),sizeof(unsigned));
         m_n_diverge = (unsigned*) calloc(config->num_shader(),sizeof(unsigned));
-        shader_cycle_distro = (unsigned*) calloc(config->warp_size+3, sizeof(unsigned));
-        last_shader_cycle_distro = (unsigned*) calloc(m_config->warp_size+3, sizeof(unsigned));
+        shader_cycle_distro = (unsigned*) calloc(config->warp_size+5, sizeof(unsigned));
+        last_shader_cycle_distro = (unsigned*) calloc(m_config->warp_size+5, sizeof(unsigned));
 
         n_simt_to_mem = (long *)calloc(config->num_shader(), sizeof(long));
         n_mem_to_simt = (long *)calloc(config->num_shader(), sizeof(long));
@@ -1754,6 +1958,7 @@ public:
     void fetch();
     void register_cta_thread_exit( unsigned cta_num );
 
+    void clear_fetch_buffer();
     void decode();
     
     void issue();
@@ -1761,8 +1966,9 @@ public:
     friend class TwoLevelScheduler;
     friend class LooseRoundRobbinScheduler;
     void issue_warp( register_set& warp, const warp_inst_t *pI, const active_mask_t &active_mask, unsigned warp_id );
-    void func_exec_inst( warp_inst_t &inst );
-
+    void issue_warp_OoO( register_set& pipe_reg_set, const warp_inst_t* next_inst, const warp_inst_t* new_inst, const active_mask_t &active_mask, unsigned warp_id );
+    void func_exec_inst( warp_inst_t &inst, bool isOoO );
+    bool check_not_exit(const warp_inst_t* next_inst, unsigned warp_id);
      // Returns numbers of addresses in translated_addrs
     unsigned translate_local_memaddr( address_type localaddr, unsigned tid, unsigned num_shader, unsigned datasize, new_addr_type* translated_addrs );
 

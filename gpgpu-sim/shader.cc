@@ -447,6 +447,8 @@ void shader_core_stats::print( FILE* fout ) const
    fprintf(fout, "W0_Scoreboard:%d", shader_cycle_distro[1]);
    for (unsigned i = 3; i < m_config->warp_size + 3; i++) 
       fprintf(fout, "\tW%d:%d", i-2, shader_cycle_distro[i]);
+   fprintf(fout, "\tW0_ino_insn:%d\t", shader_cycle_distro[35]);
+   fprintf(fout, "W0_ooo_insn:%d\t", shader_cycle_distro[36]);
    fprintf(fout, "\n");
 
    m_outgoing_traffic_stats->print(fout); 
@@ -476,8 +478,10 @@ void shader_core_stats::visualizer_print( gzFile visualizer_file )
     gzprintf(visualizer_file, " %d", (shader_cycle_distro[0] - last_shader_cycle_distro[0]) / cf );
     gzprintf(visualizer_file, " %d", (shader_cycle_distro[1] - last_shader_cycle_distro[1]) / cf );
     gzprintf(visualizer_file, " %d", (shader_cycle_distro[2] - last_shader_cycle_distro[2]) / cf );
-    for (unsigned i=0; i<m_config->warp_size+3; i++) {
-       if ( i>=3 ) {
+    gzprintf(visualizer_file, " %d", (shader_cycle_distro[35] - last_shader_cycle_distro[35]) / cf );
+    gzprintf(visualizer_file, " %d", (shader_cycle_distro[36] - last_shader_cycle_distro[36]) / cf );
+    for (unsigned i=0; i<m_config->warp_size+5; i++) {
+       if ( i>=3 && i<=34 ) {
           total += (shader_cycle_distro[i] - last_shader_cycle_distro[i]);
           if ( ((i-3) % (m_config->warp_size/8)) == ((m_config->warp_size/8)-1) ) {
              gzprintf(visualizer_file, " %d", total / cf );
@@ -562,53 +566,121 @@ void shader_core_stats::visualizer_print( gzFile visualizer_file )
 #define PROGRAM_MEM_START 0xF0000000 /* should be distinct from other memory spaces... 
                                         check ptx_ir.h to verify this does not overlap 
                                         other memory spaces */
+
+void shader_core_ctx::clear_fetch_buffer()
+{
+    m_inst_fetch_buffer.m_valid = false;
+}
+
 void shader_core_ctx::decode()
 {
     if( m_inst_fetch_buffer.m_valid ) {
-        // decode 1 or 2 instructions and place them into ibuffer
-        address_type pc = m_inst_fetch_buffer.m_pc;
-        const warp_inst_t* pI1 = ptx_fetch_inst(pc);
-        m_warp[m_inst_fetch_buffer.m_warp_id].ibuffer_fill(0,pI1);
-        m_warp[m_inst_fetch_buffer.m_warp_id].inc_inst_in_pipeline();
-        if( pI1 ) {
-            m_stats->m_num_decoded_insn[m_sid]++;
-            if(pI1->oprnd_type==INT_OP){
-                m_stats->m_num_INTdecoded_insn[m_sid]++;
-            }else if(pI1->oprnd_type==FP_OP) {
-            	m_stats->m_num_FPdecoded_insn[m_sid]++;
+        if(!m_warp[m_inst_fetch_buffer.m_warp_id].dont_decode)
+        {
+            // decode 1 or 2 instructions and place them into ibuffer
+            address_type pc = m_inst_fetch_buffer.m_pc;
+            const warp_inst_t* pI1 = ptx_fetch_inst(pc);
+            m_warp[m_inst_fetch_buffer.m_warp_id].ibuffer_fill(0,pI1);
+            m_warp[m_inst_fetch_buffer.m_warp_id].inc_inst_in_pipeline();
+            if( pI1 ) {
+                m_stats->m_num_decoded_insn[m_sid]++;
+                if(pI1->oprnd_type==INT_OP){
+                    m_stats->m_num_INTdecoded_insn[m_sid]++;
+                }else if(pI1->oprnd_type==FP_OP) {
+                    m_stats->m_num_FPdecoded_insn[m_sid]++;
+                }
+                const warp_inst_t* pI2 = ptx_fetch_inst(pc+pI1->isize);
+                if( pI2 ) {
+                    m_warp[m_inst_fetch_buffer.m_warp_id].ibuffer_fill(1,pI2);
+                    m_warp[m_inst_fetch_buffer.m_warp_id].inc_inst_in_pipeline();
+                    m_stats->m_num_decoded_insn[m_sid]++;
+                    if(pI2->oprnd_type==INT_OP){
+                        m_stats->m_num_INTdecoded_insn[m_sid]++;
+                    }else if(pI2->oprnd_type==FP_OP) {
+                        m_stats->m_num_FPdecoded_insn[m_sid]++;
+                    }
+                }
             }
-           const warp_inst_t* pI2 = ptx_fetch_inst(pc+pI1->isize);
-           if( pI2 ) {
-               m_warp[m_inst_fetch_buffer.m_warp_id].ibuffer_fill(1,pI2);
-               m_warp[m_inst_fetch_buffer.m_warp_id].inc_inst_in_pipeline();
-               m_stats->m_num_decoded_insn[m_sid]++;
-               if(pI2->oprnd_type==INT_OP){
-                   m_stats->m_num_INTdecoded_insn[m_sid]++;
-               }else if(pI2->oprnd_type==FP_OP) {
-            	   m_stats->m_num_FPdecoded_insn[m_sid]++;
-               }
-           }
+            m_inst_fetch_buffer.m_valid = false;
         }
-        m_inst_fetch_buffer.m_valid = false;
+        else
+        {
+            m_inst_fetch_buffer.m_valid = false;
+        }
     }
 }
 
 void shader_core_ctx::fetch()
 {
-
     if( !m_inst_fetch_buffer.m_valid ) {
-        if( m_L1I->access_ready() ) {
-            mem_fetch *mf = m_L1I->next_access();
-            m_warp[mf->get_wid()].clear_imiss_pending();
-            m_inst_fetch_buffer = ifetch_buffer_t(m_warp[mf->get_wid()].get_pc(), mf->get_access_size(), mf->get_wid());
-            assert( m_warp[mf->get_wid()].get_pc() == (mf->get_addr()-PROGRAM_MEM_START)); // Verify that we got the instruction we were expecting.
-            m_inst_fetch_buffer.m_valid = true;
-            m_warp[mf->get_wid()].set_last_fetch(gpu_sim_cycle);
-            delete mf;
+        // find an active warp with space in instruction buffer that is not already waiting on a cache miss
+        // and get next 1-2 instructions from i-cache...
+        bool has_fetched = false;
+        for( unsigned i=0; i < m_config->max_warps_per_shader; i++ ) {
+            unsigned warp_id = (m_last_warp_fetched+1+i) % m_config->max_warps_per_shader;
+
+            // this code checks if this warp has finished executing and can be reclaimed
+            if( m_warp[warp_id].hardware_done() && !m_scoreboard->pendingWrites(warp_id) && !m_warp[warp_id].done_exit() ) {
+                bool did_exit=false;
+                for( unsigned t=0; t<m_config->warp_size;t++) {
+                    unsigned tid=warp_id*m_config->warp_size+t;
+                    if( m_threadState[tid].m_active == true ) {
+                        m_threadState[tid].m_active = false; 
+                        unsigned cta_id = m_warp[warp_id].get_cta_id();
+                        register_cta_thread_exit(cta_id);
+                        m_not_completed -= 1;
+                        m_active_threads.reset(tid);
+                        assert( m_thread[tid]!= NULL );
+                        did_exit=true;
+                    }
+                }
+                if( did_exit ) 
+                    m_warp[warp_id].set_done_exit();
+            }
+
+            // this code fetches instructions from the i-cache or generates memory requests
+            if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending() && m_warp[warp_id].ibuffer_empty() ) {
+                address_type pc  = m_warp[warp_id].get_fetch_pc();
+                address_type ppc = pc + PROGRAM_MEM_START;
+                unsigned nbytes=16; 
+                unsigned offset_in_block = pc & (m_config->m_L1I_config.get_line_sz()-1);
+                if( (offset_in_block+nbytes) > m_config->m_L1I_config.get_line_sz() )
+                    nbytes = (m_config->m_L1I_config.get_line_sz()-offset_in_block);
+
+                // TODO: replace with use of allocator
+                // mem_fetch *mf = m_mem_fetch_allocator->alloc()
+                mem_access_t acc(INST_ACC_R,ppc,nbytes,false);
+                mem_fetch *mf = new mem_fetch(acc,
+                                              NULL/*we don't have an instruction yet*/,
+                                              READ_PACKET_SIZE,
+                                              warp_id,
+                                              m_sid,
+                                              m_tpc,
+                                              m_memory_config );
+                std::list<cache_event> events;
+                enum cache_request_status status = m_L1I->access( (new_addr_type)ppc, mf, gpu_sim_cycle+gpu_tot_sim_cycle,events);
+                if( status == MISS ) {
+                    m_last_warp_fetched=warp_id;
+                    m_warp[warp_id].set_imiss_pending();
+                    m_warp[warp_id].set_last_fetch(gpu_sim_cycle);
+                } else if( status == HIT ) {
+                    m_last_warp_fetched=warp_id;
+                    m_inst_fetch_buffer = ifetch_buffer_t(pc,nbytes,warp_id);
+                    m_warp[warp_id].set_last_fetch(gpu_sim_cycle);
+                    delete mf;
+                } else {
+                    m_last_warp_fetched=warp_id;
+                    assert( status == RESERVATION_FAIL );
+                    delete mf;
+                }
+                if(m_warp[warp_id].dont_decode == true)
+                    m_warp[warp_id].dont_decode = false;
+                has_fetched = true;
+                break;
+            }
         }
-        else {
-            // find an active warp with space in instruction buffer that is not already waiting on a cache miss
-            // and get next 1-2 instructions from i-cache...
+        if(!has_fetched)
+        {
             for( unsigned i=0; i < m_config->max_warps_per_shader; i++ ) {
                 unsigned warp_id = (m_last_warp_fetched+1+i) % m_config->max_warps_per_shader;
 
@@ -632,8 +704,8 @@ void shader_core_ctx::fetch()
                 }
 
                 // this code fetches instructions from the i-cache or generates memory requests
-                if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending() && m_warp[warp_id].ibuffer_empty() ) {
-                    address_type pc  = m_warp[warp_id].get_pc();
+                if( !m_warp[warp_id].functional_done() && !m_warp[warp_id].imiss_pending() && m_warp[warp_id].ibuffer_partial_empty() ) {
+                    address_type pc  = m_warp[warp_id].get_fetch_pc();
                     address_type ppc = pc + PROGRAM_MEM_START;
                     unsigned nbytes=16; 
                     unsigned offset_in_block = pc & (m_config->m_L1I_config.get_line_sz()-1);
@@ -644,12 +716,12 @@ void shader_core_ctx::fetch()
                     // mem_fetch *mf = m_mem_fetch_allocator->alloc()
                     mem_access_t acc(INST_ACC_R,ppc,nbytes,false);
                     mem_fetch *mf = new mem_fetch(acc,
-                            NULL/*we don't have an instruction yet*/,
-                            READ_PACKET_SIZE,
-                            warp_id,
-                            m_sid,
-                            m_tpc,
-                            m_memory_config );
+                                                NULL/*we don't have an instruction yet*/,
+                                                    READ_PACKET_SIZE,
+                                                    warp_id,
+                                                    m_sid,
+                                                    m_tpc,
+                                                    m_memory_config );
                     std::list<cache_event> events;
                     enum cache_request_status status = m_L1I->access( (new_addr_type)ppc, mf, gpu_sim_cycle+gpu_tot_sim_cycle,events);
                     if( status == MISS ) {
@@ -666,6 +738,7 @@ void shader_core_ctx::fetch()
                         assert( status == RESERVATION_FAIL );
                         delete mf;
                     }
+                    has_fetched = true;
                     break;
                 }
             }
@@ -673,26 +746,34 @@ void shader_core_ctx::fetch()
     }
 
     m_L1I->cycle();
+
+    if( m_L1I->access_ready() ) {
+        mem_fetch *mf = m_L1I->next_access();
+        m_warp[mf->get_wid()].clear_imiss_pending();
+        delete mf;
+    }
 }
 
-void shader_core_ctx::func_exec_inst( warp_inst_t &inst )
+void shader_core_ctx::func_exec_inst( warp_inst_t &inst, bool isOoO )
 {
-    execute_warp_inst_t(inst);
+    execute_warp_inst_t(inst, isOoO);
     if( inst.is_load() || inst.is_store() )
         inst.generate_mem_accesses();
 }
 
 void shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t* next_inst, const active_mask_t &active_mask, unsigned warp_id )
 {
+    // printf("Issued, warp_id:%i,op:%i\n",warp_id,next_inst->op);
     warp_inst_t** pipe_reg = pipe_reg_set.get_free();
     assert(pipe_reg);
-
+    
     m_warp[warp_id].ibuffer_free();
     assert(next_inst->valid());
     **pipe_reg = *next_inst; // static instruction information
     (*pipe_reg)->issue( active_mask, warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, m_warp[warp_id].get_dynamic_warp_id() ); // dynamic instruction information
     m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
-    func_exec_inst( **pipe_reg );
+    func_exec_inst( **pipe_reg, m_warp[warp_id].isOoO );
+
     if( next_inst->op == BARRIER_OP ){
     	m_warp[warp_id].store_info_of_last_inst_at_barrier(*pipe_reg);
         m_barriers.warp_reaches_barrier(m_warp[warp_id].get_cta_id(),warp_id,const_cast<warp_inst_t*> (next_inst));
@@ -703,13 +784,73 @@ void shader_core_ctx::issue_warp( register_set& pipe_reg_set, const warp_inst_t*
 
     updateSIMTStack(warp_id,*pipe_reg);
     m_scoreboard->reserveRegisters(*pipe_reg);
-    m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
+
+    if(m_warp[warp_id].isOoO == false)
+    {
+        m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
+    }
+    else if(m_warp[warp_id].OoO_inst->pc > next_inst->pc + next_inst->isize)
+    {
+        m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
+    }
+    else if(m_warp[warp_id].OoO_inst->pc == next_inst->pc + next_inst->isize)
+    {
+        m_warp[warp_id].set_next_pc(next_inst->pc + next_inst->isize);
+        
+        // Update the PC in functional model
+        execute_warp_inst_t_update(**pipe_reg);
+
+        warp_inst_t** new_inst;
+        new_inst = new warp_inst_t*;
+        *new_inst = new warp_inst_t;
+        **new_inst = *m_warp[warp_id].OoO_inst;
+        m_warp[warp_id].set_next_pc(m_warp[warp_id].OoO_inst->pc + m_warp[warp_id].OoO_inst->isize);
+        
+        updateSIMTStack(warp_id,*new_inst);
+        m_warp[warp_id].revert_to_in_order();
+        m_warp[warp_id].ibuffer_step();
+        free((void*)*new_inst);
+        free((void*)new_inst);
+        // printf("Back in order\n");
+    }
+}
+
+void shader_core_ctx::issue_warp_OoO( register_set& pipe_reg_set, const warp_inst_t* next_inst, const warp_inst_t* new_inst, const active_mask_t &active_mask, unsigned warp_id )
+{
+    // printf("Issued OoO type:%i,pc:%i\n",new_inst->op,new_inst->pc);
+    warp_inst_t** pipe_reg = pipe_reg_set.get_free();
+    assert(pipe_reg);
+    
+    m_warp[warp_id].ibuffer_free_OoO();
+    assert(new_inst->valid());
+    **pipe_reg = *new_inst; // static instruction information
+    (*pipe_reg)->issue( active_mask, warp_id, gpu_tot_sim_cycle + gpu_sim_cycle, m_warp[warp_id].get_dynamic_warp_id() ); // dynamic instruction information
+    m_stats->shader_cycle_distro[2+(*pipe_reg)->active_count()]++;
+    func_exec_inst( **pipe_reg, m_warp[warp_id].isOoO );
+    if( next_inst->op == BARRIER_OP ){
+    	m_warp[warp_id].store_info_of_last_inst_at_barrier(*pipe_reg);
+        m_barriers.warp_reaches_barrier(m_warp[warp_id].get_cta_id(),warp_id,const_cast<warp_inst_t*> (next_inst));
+
+    }else if( next_inst->op == MEMORY_BARRIER_OP ){
+        m_warp[warp_id].set_membar();
+    }
+
+    // updateSIMTStack(warp_id,*pipe_reg);
+    m_scoreboard->reserveRegisters(*pipe_reg);
+    m_warp[warp_id].set_next_pc(next_inst->pc);     // Precautionary
+}
+
+bool shader_core_ctx::check_not_exit(const warp_inst_t* next_inst, unsigned warp_id)
+{
+    // return true;
+    return check_exit( warp_id, next_inst->pc);
 }
 
 void shader_core_ctx::issue(){
     //really is issue;
+
     for (unsigned i = 0; i < schedulers.size(); i++) {
-        schedulers[i]->cycle();
+	schedulers[i]->cycle();
     }
 }
 
@@ -737,21 +878,21 @@ shd_warp_t& scheduler_unit::warp(int i){
  *                          limit this number. If the number if < m_supervised_warps.size(), then only
  *                          the warps with highest RR priority will be placed in the result_list.
  */
-    template < class T >
+template < class T >
 void scheduler_unit::order_lrr( std::vector< T >& result_list,
-        const typename std::vector< T >& input_list,
-        const typename std::vector< T >::const_iterator& last_issued_from_input,
-        unsigned num_warps_to_add )
+                                const typename std::vector< T >& input_list,
+                                const typename std::vector< T >::const_iterator& last_issued_from_input,
+                                unsigned num_warps_to_add )
 {
     assert( num_warps_to_add <= input_list.size() );
     result_list.clear();
     typename std::vector< T >::const_iterator iter
         = ( last_issued_from_input ==  input_list.end() ) ? input_list.begin()
-        : last_issued_from_input + 1;
+                                                          : last_issued_from_input + 1;
 
     for ( unsigned count = 0;
-            count < num_warps_to_add;
-            ++iter, ++count) {
+          count < num_warps_to_add;
+          ++iter, ++count) {
         if ( iter ==  input_list.end() ) {
             iter = input_list.begin();
         }
@@ -772,11 +913,11 @@ void scheduler_unit::order_lrr( std::vector< T >& result_list,
  */
 template < class T >
 void scheduler_unit::order_by_priority( std::vector< T >& result_list,
-        const typename std::vector< T >& input_list,
-        const typename std::vector< T >::const_iterator& last_issued_from_input,
-        unsigned num_warps_to_add,
-        OrderingType ordering,
-        bool (*priority_func)(T lhs, T rhs) )
+                                        const typename std::vector< T >& input_list,
+                                        const typename std::vector< T >::const_iterator& last_issued_from_input,
+                                        unsigned num_warps_to_add,
+                                        OrderingType ordering,
+                                        bool (*priority_func)(T lhs, T rhs) )
 {
     assert( num_warps_to_add <= input_list.size() );
     result_list.clear();
@@ -811,7 +952,8 @@ void scheduler_unit::cycle()
     bool valid_inst = false;  // there was one warp with a valid instruction to issue (didn't require flush due to control hazard)
     bool ready_inst = false;  // of the valid instructions, there was one not waiting for pending register writes
     bool issued_inst = false; // of these we issued one
-
+    bool ooo_inst = false; //of these in ooo mode
+    bool ino_inst = false; //and these in ino mode
     order_warps();
     for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
           iter != m_next_cycle_prioritized_warps.end();
@@ -842,7 +984,9 @@ void scheduler_unit::cycle()
                                    (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
                     // control hazard
                     warp(warp_id).set_next_pc(pc);
+                    warp(warp_id).set_next_fetch_pc(pc);
                     warp(warp_id).ibuffer_flush();
+                    warp(warp_id).clear_decode();
                 } else {
                     valid_inst = true;
                     if ( !m_scoreboard->checkCollision(warp_id, pI) ) {
@@ -855,7 +999,8 @@ void scheduler_unit::cycle()
                             if( m_mem_out->has_free() ) {
                                 m_shader->issue_warp(*m_mem_out,pI,active_mask,warp_id);
                                 issued++;
-                                issued_inst=true;
+                                issued_inst = true;
+				                ino_inst=true;
                                 warp_inst_issued = true;
                             }
                         } else {
@@ -865,13 +1010,15 @@ void scheduler_unit::cycle()
                                 // always prefer SP pipe for operations that can use both SP and SFU pipelines
                                 m_shader->issue_warp(*m_sp_out,pI,active_mask,warp_id);
                                 issued++;
-                                issued_inst=true;
+                                issued_inst = true;
+				                ino_inst=true;
                                 warp_inst_issued = true;
                             } else if ( (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP) ) {
                                 if( sfu_pipe_avail ) {
                                     m_shader->issue_warp(*m_sfu_out,pI,active_mask,warp_id);
                                     issued++;
-                                    issued_inst=true;
+                                    issued_inst = true;
+				                    ino_inst=true;
                                     warp_inst_issued = true;
                                 }
                             }                         }
@@ -881,11 +1028,13 @@ void scheduler_unit::cycle()
                     }
                 }
             } else if( valid ) {
-               // this case can happen after a return instruction in diverged warp
-               SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) return from diverged warp flush\n",
+                // this case can happen after a return instruction in diverged warp
+                SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) return from diverged warp flush\n",
                               (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
-               warp(warp_id).set_next_pc(pc);
-               warp(warp_id).ibuffer_flush();
+                warp(warp_id).set_next_pc(pc);
+                warp(warp_id).set_next_fetch_pc(pc);
+                warp(warp_id).ibuffer_flush();
+                warp(warp_id).clear_decode();
             }
             if(warp_inst_issued) {
                 SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) issued %u instructions\n",
@@ -913,6 +1062,130 @@ void scheduler_unit::cycle()
         } 
     }
 
+
+    
+
+    if(!issued_inst)
+    {
+         // of these we issued one    
+        /////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Find the OoO instruction from the warp given that an OoO instruction is not previously executed //
+        /////////////////////////////////////////////////////////////////////////////////////////////////////
+        for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
+          iter != m_next_cycle_prioritized_warps.end();
+          iter++ ) 
+        {
+            // Don't consider warps that are not yet valid
+            if ( (*iter) == NULL || (*iter)->done_exit() ) {
+                continue;
+            }
+            SCHED_DPRINTF( "Testing (warp_id %u, dynamic_warp_id %u)\n",
+                       (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+            unsigned warp_id = (*iter)->get_warp_id();
+            unsigned checked=0;
+            unsigned issued=0;
+            unsigned max_issue = m_shader->m_config->gpgpu_max_insn_issue_per_warp;
+            // Instruction buffer of warp is not empty && We can issue new instruction
+            while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() && (checked < max_issue) && (checked <= issued) && (issued < max_issue) && !(warp(warp_id).isOoO) ) {
+                // This also checks for the possible scoreboard collision with all the previous instructions
+
+                unsigned pc,rpc;
+                // Get the top of the stack
+                m_simt_stack[warp_id]->get_pdom_stack_top_info(&pc,&rpc);
+                // printf("Here1\n");
+                const warp_inst_t *pI_orig = warp(warp_id).ibuffer_next_inst_OoO();  // PC of the next instruction
+                // printf("Here2\n");
+                const warp_inst_t *pI = warp(warp_id).OoO_inst;  // PC of the OoO instruction
+
+                // Checked the validity while checking for pI (just above)
+                bool warp_inst_issued = false;
+                // Check if the instruction is not a branch instruction (Checked in ibuffer_next_inst_OoO)
+                       // printf("############PC:%i,RPC:%i\n",pc,rpc);                
+                if(pI_orig && pI->pc < rpc && m_shader->check_not_exit(pI,warp_id))
+                {   
+                    if( pI ) 
+                    {
+                        //printf("************PC:%i,RPC:%i\n",pc,rpc);
+                        valid_inst = true;
+                        // Check for data hazard and branch instruction, Also we need to check with the stalled instruction for dependence
+                        if ( !m_scoreboard->checkCollision(warp_id, pI) ) {
+                            SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) passes scoreboard\n",
+                                    (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+                            ready_inst = true;
+                            const active_mask_t &active_mask = m_simt_stack[warp_id]->get_active_mask();
+                            assert( warp(warp_id).inst_in_pipeline() );
+                            // Find the type of instruction and execute accordingly
+                            if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) 
+                            {
+                                if( m_mem_out->has_free() ) {
+                                    m_shader->issue_warp_OoO(*m_mem_out,pI_orig,pI,active_mask,warp_id);
+                                    issued++;
+				                    ooo_inst=true;
+                                    issued_inst = true;
+                                    warp_inst_issued = true;
+                                }
+                            } 
+                            else 
+                            {
+                                bool sp_pipe_avail = m_sp_out->has_free();
+                                bool sfu_pipe_avail = m_sfu_out->has_free();
+                                if( sp_pipe_avail && (pI->op != SFU_OP) ) {
+                                    // always prefer SP pipe for operations that can use both SP and SFU pipelines
+                                    m_shader->issue_warp_OoO(*m_sp_out,pI_orig,pI,active_mask,warp_id);
+                                    issued++;
+				                    ooo_inst=true;
+                                    issued_inst = true;
+                                    warp_inst_issued = true;
+                                } else if ( (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP) ) {
+                                    if( sfu_pipe_avail ) {
+                                        m_shader->issue_warp_OoO(*m_sfu_out,pI_orig,pI,active_mask,warp_id);
+                                        issued++;
+					                    ooo_inst=true;
+                                        issued_inst = true;
+                                        warp_inst_issued = true;
+                                    }
+                                }
+                            }
+                        } else {
+                            SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) fails scoreboard\n",
+                            (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+                        }
+                    }    
+                }
+                
+                if(warp_inst_issued) {
+                    SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) issued %u instructions\n",
+                                (*iter)->get_warp_id(),
+                                (*iter)->get_dynamic_warp_id(),
+                                issued );
+                    do_on_warp_issued_OoO( warp_id, issued, iter );
+                }
+                else
+                    warp(warp_id).revert_to_in_order();
+                checked++;
+            }
+        //}
+
+
+
+            // If an instruction is issued we stop checking for the new warp to issue instruction
+            if ( issued ) {
+                // This might be a bit inefficient, but we need to maintain
+                // two ordered list for proper scheduler execution.
+                // We could remove the need for this loop by associating a
+                // supervised_is index with each entry in the m_next_cycle_prioritized_warps
+                // vector. For now, just run through until you find the right warp_id
+                for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
+                    supervised_iter != m_supervised_warps.end();
+                    ++supervised_iter ) {
+                    if ( *iter == *supervised_iter ) {
+                        m_last_supervised_issued = supervised_iter;
+                    }
+                }
+                break;
+            } 
+        }
+    }
     // issue stall statistics:
     if( !valid_inst ) 
         m_stats->shader_cycle_distro[0]++; // idle or control hazard
@@ -920,6 +1193,11 @@ void scheduler_unit::cycle()
         m_stats->shader_cycle_distro[1]++; // waiting for RAW hazards (possibly due to memory) 
     else if( !issued_inst ) 
         m_stats->shader_cycle_distro[2]++; // pipeline stalled
+    
+    if(ino_inst)
+	m_stats->shader_cycle_distro[35]++; //ino instructions
+    if(ooo_inst)
+	m_stats->shader_cycle_distro[36]++; //ooo instructions
 }
 
 void scheduler_unit::do_on_warp_issued( unsigned warp_id,
@@ -931,6 +1209,17 @@ void scheduler_unit::do_on_warp_issued( unsigned warp_id,
                                 num_issued,
                                 warp(warp_id).get_dynamic_warp_id() );
     warp(warp_id).ibuffer_step();
+}
+
+void scheduler_unit::do_on_warp_issued_OoO( unsigned warp_id,
+                                        unsigned num_issued,
+                                        const std::vector< shd_warp_t* >::const_iterator& prioritized_iter )
+{
+    m_stats->event_warp_issued( m_shader->get_sid(),
+                                warp_id,
+                                num_issued,
+                                warp(warp_id).get_dynamic_warp_id() );
+    // warp(warp_id).ibuffer_step();
 }
 
 bool scheduler_unit::sort_warps_by_oldest_dynamic_id(shd_warp_t* lhs, shd_warp_t* rhs)
@@ -1800,55 +2089,55 @@ void ldst_unit::issue( register_set &reg_set )
 */
 void ldst_unit::cycle()
 {
-   writeback();
-   m_operand_collector->step();
-   for( unsigned stage=0; (stage+1)<m_pipeline_depth; stage++ ) 
-       if( m_pipeline_reg[stage]->empty() && !m_pipeline_reg[stage+1]->empty() )
+    writeback();
+    m_operand_collector->step();
+    for( unsigned stage=0; (stage+1)<m_pipeline_depth; stage++ ) 
+        if( m_pipeline_reg[stage]->empty() && !m_pipeline_reg[stage+1]->empty() )
             move_warp(m_pipeline_reg[stage], m_pipeline_reg[stage+1]);
 
-   if( !m_response_fifo.empty() ) {
-       mem_fetch *mf = m_response_fifo.front();
-       if (mf->istexture()) {
-           if (m_L1T->fill_port_free()) {
-               m_L1T->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
-               m_response_fifo.pop_front(); 
-           }
-       } else if (mf->isconst())  {
-           if (m_L1C->fill_port_free()) {
-               mf->set_status(IN_SHADER_FETCHED,gpu_sim_cycle+gpu_tot_sim_cycle);
-               m_L1C->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
-               m_response_fifo.pop_front(); 
-           }
-       } else {
-    	   if( mf->get_type() == WRITE_ACK || ( m_config->gpgpu_perfect_mem && mf->get_is_write() )) {
-               m_core->store_ack(mf);
-               m_response_fifo.pop_front();
-               delete mf;
-           } else {
-               assert( !mf->get_is_write() ); // L1 cache is write evict, allocate line on load miss only
+    if( !m_response_fifo.empty() ) {
+        mem_fetch *mf = m_response_fifo.front();
+        if (mf->istexture()) {
+            if (m_L1T->fill_port_free()) {
+                m_L1T->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
+                m_response_fifo.pop_front(); 
+            }
+        } else if (mf->isconst())  {
+            if (m_L1C->fill_port_free()) {
+                mf->set_status(IN_SHADER_FETCHED,gpu_sim_cycle+gpu_tot_sim_cycle);
+                m_L1C->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
+                m_response_fifo.pop_front(); 
+            }
+        } else {
+            if( mf->get_type() == WRITE_ACK || ( m_config->gpgpu_perfect_mem && mf->get_is_write() )) {
+                m_core->store_ack(mf);
+                m_response_fifo.pop_front();
+                delete mf;
+            } else {
+                assert( !mf->get_is_write() ); // L1 cache is write evict, allocate line on load miss only
 
-               bool bypassL1D = false; 
-               if ( CACHE_GLOBAL == mf->get_inst().cache_op || (m_L1D == NULL) ) {
-                   bypassL1D = true; 
-               } else if (mf->get_access_type() == GLOBAL_ACC_R || mf->get_access_type() == GLOBAL_ACC_W) { // global memory access 
-                   if (m_core->get_config()->gmem_skip_L1D)
-                       bypassL1D = true; 
-               }
-               if( bypassL1D ) {
-                   if ( m_next_global == NULL ) {
-                       mf->set_status(IN_SHADER_FETCHED,gpu_sim_cycle+gpu_tot_sim_cycle);
-                       m_response_fifo.pop_front();
-                       m_next_global = mf;
-                   }
-               } else {
-                   if (m_L1D->fill_port_free()) {
-                       m_L1D->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
-                       m_response_fifo.pop_front();
-                   }
-               }
-           }
-       }
-   }
+                bool bypassL1D = false; 
+                if ( CACHE_GLOBAL == mf->get_inst().cache_op || (m_L1D == NULL) ) {
+                    bypassL1D = true; 
+                } else if (mf->get_access_type() == GLOBAL_ACC_R || mf->get_access_type() == GLOBAL_ACC_W) { // global memory access 
+                    if (m_core->get_config()->gmem_skip_L1D)
+                        bypassL1D = true; 
+                }
+                if( bypassL1D ) {
+                    if ( m_next_global == NULL ) {
+                        mf->set_status(IN_SHADER_FETCHED,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        m_response_fifo.pop_front();
+                        m_next_global = mf;
+                    }
+                } else {
+                    if (m_L1D->fill_port_free()) {
+                        m_L1D->fill(mf,gpu_sim_cycle+gpu_tot_sim_cycle);
+                        m_response_fifo.pop_front();
+                    }
+                }
+            }
+        }
+    }
 
    m_L1T->cycle();
    m_L1C->cycle();
@@ -3446,7 +3735,10 @@ void shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned 
         }
         if ( ptx_thread_done(tid) ) {
             m_warp[inst.warp_id()].set_completed(t);
+            // printf("completed\n");
             m_warp[inst.warp_id()].ibuffer_flush();
+            if(m_inst_fetch_buffer.m_warp_id == inst.warp_id())
+                m_inst_fetch_buffer.m_valid = false;
         }
 
     // PC-Histogram Update 
@@ -3459,4 +3751,3 @@ void shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned 
         }
     }
 }
-

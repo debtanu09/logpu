@@ -1187,13 +1187,42 @@ static unsigned get_tex_datasize( const ptx_instruction *pI, ptx_thread_info *th
    return data_size; 
 }
 
-void ptx_thread_info::ptx_exec_inst( warp_inst_t &inst, unsigned lane_id)
+bool ptx_thread_info::is_exit_pc(addr_t pc)
+{
+   if(m_func_info->get_instruction(pc))
+   {
+      int opcode = m_func_info->get_instruction(pc)->get_opcode();
+      if( opcode == 24)
+         //free((void*)pI);
+         return true;
+   }
+   else
+   {
+      //free((void*)pI);
+      return true;
+   }
+   //free((void*)pI);
+   // printf("%i\n",pI->get_opcode());
+   return false;
+}
+
+void ptx_thread_info::ptx_exec_inst_update()
+{
+   addr_t pc = next_instr();      // When called this will have the OoO instruction
+   set_npc( pc + m_func_info->get_instruction(pc)->inst_size() );
+   update_pc();
+}
+
+void ptx_thread_info::ptx_exec_inst( warp_inst_t &inst, unsigned lane_id, bool isOoO)
 {
     
    bool skip = false;
    int op_classification = 0;
    addr_t pc = next_instr();
-   assert( pc == inst.pc ); // make sure timing model and functional model are in sync
+   if(!isOoO)
+      assert( pc == inst.pc ); // make sure timing model and functional model are in sync
+   else
+      pc = inst.pc;
    const ptx_instruction *pI = m_func_info->get_instruction(pc);
    set_npc( pc + pI->inst_size() );
    

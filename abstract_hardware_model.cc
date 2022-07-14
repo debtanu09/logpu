@@ -784,21 +784,39 @@ void simt_stack::update( simt_mask_t &thread_done, addr_vector_t &next_pc, addre
     }
 }
 
-void core_t::execute_warp_inst_t(warp_inst_t &inst, unsigned warpId)
+void core_t::execute_warp_inst_t(warp_inst_t &inst, bool isOoO, unsigned warpId)
 {
     for ( unsigned t=0; t < m_warp_size; t++ ) {
         if( inst.active(t) ) {
             if(warpId==(unsigned (-1)))
                 warpId = inst.warp_id();
             unsigned tid=m_warp_size*warpId+t;
-            m_thread[tid]->ptx_exec_inst(inst,t);
+            m_thread[tid]->ptx_exec_inst(inst,t,isOoO);
             
             //virtual function
             checkExecutionStatusAndUpdate(inst,t,tid);
         }
     } 
 }
-  
+
+void core_t::execute_warp_inst_t_update(warp_inst_t &inst, unsigned warpId)
+{
+    for ( unsigned t=0; t < m_warp_size; t++ ) {
+        if( inst.active(t) ) {
+            if(warpId==(unsigned (-1)))
+                warpId = inst.warp_id();
+            unsigned tid=m_warp_size*warpId+t;
+            m_thread[tid]->ptx_exec_inst_update();
+        }
+    } 
+}
+
+bool core_t::check_exit(unsigned warpId, address_type pc)
+{
+    unsigned tid=m_warp_size*warpId;
+    return !m_thread[tid]->is_exit_pc(pc);
+}
+
 bool  core_t::ptx_thread_done( unsigned hw_thread_id ) const  
 {
     return ((m_thread[ hw_thread_id ]==NULL) || m_thread[ hw_thread_id ]->is_done());

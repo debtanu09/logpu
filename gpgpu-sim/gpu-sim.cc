@@ -561,6 +561,10 @@ gpgpu_sim::gpgpu_sim( const gpgpu_sim_config &config )
     active_sms=(float *)malloc(sizeof(float));
     m_power_stats = new power_stat_t(m_shader_config,average_pipeline_duty_cycle,active_sms,m_shader_stats,m_memory_config,m_memory_stats);
 
+    gpu_ooo_insn = 0;
+    gpu_tot_ooo_insn = 0;
+    gpu_ino_insn = 0;
+    gpu_tot_ino_insn = 0;
     gpu_sim_insn = 0;
     gpu_tot_sim_insn = 0;
     gpu_tot_issued_cta = 0;
@@ -685,6 +689,8 @@ void gpgpu_sim::init()
     gpu_sim_insn = 0;
     last_gpu_sim_insn = 0;
     m_total_cta_launched=0;
+    gpu_ooo_insn = 0;
+    gpu_ino_insn = 0;
 
     reinit_clock_domains();
     set_param_gpgpu_num_shaders(m_config.num_shader());
@@ -720,6 +726,8 @@ void gpgpu_sim::update_stats() {
     m_memory_stats->memlatstat_lat_pw();
     gpu_tot_sim_cycle += gpu_sim_cycle;
     gpu_tot_sim_insn += gpu_sim_insn;
+    gpu_tot_ooo_insn += gpu_ooo_insn;
+    gpu_tot_ino_insn += gpu_ino_insn;
 }
 
 void gpgpu_sim::print_stats()
@@ -893,8 +901,10 @@ void gpgpu_sim::gpu_print_stat()
    printf("gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn+gpu_sim_insn);
    printf("gpu_tot_ipc = %12.4f\n", (float)(gpu_tot_sim_insn+gpu_sim_insn) / (gpu_tot_sim_cycle+gpu_sim_cycle));
    printf("gpu_tot_issued_cta = %lld\n", gpu_tot_issued_cta);
-
-
+   printf("gpu_ooo_insn = %lld\n", gpu_ooo_insn);
+   printf("gpu_tot_ooo_insn = %lld\n", gpu_tot_ooo_insn+gpu_ooo_insn);
+   printf("gpu_ino_insn = %lld\n", gpu_ino_insn);
+   printf("gpu_tot_ino_insn = %lld\n", gpu_tot_ino_insn+gpu_ino_insn);
 
    // performance counter for stalls due to congestion.
    printf("gpu_stall_dramfull = %d\n", gpu_stall_dramfull);

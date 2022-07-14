@@ -274,7 +274,9 @@ public:
    }
 
    void ptx_fetch_inst( inst_t &inst ) const;
-   void ptx_exec_inst( warp_inst_t &inst, unsigned lane_id );
+   void ptx_exec_inst( warp_inst_t &inst, unsigned lane_id, bool isOoO );
+   void ptx_exec_inst_update();
+   bool is_exit_pc(addr_t pc);
 
    const ptx_version &get_ptx_version() const;
    void set_reg( const symbol *reg, const ptx_reg_t &value );
