@@ -450,7 +450,6 @@ void shader_core_stats::print( FILE* fout ) const
    fprintf(fout, "\tW0_ino_insn:%d\t", shader_cycle_distro[35]);
    fprintf(fout, "W0_ooo_insn:%d\t", shader_cycle_distro[36]);
    fprintf(fout, "\n");
-
    m_outgoing_traffic_stats->print(fout); 
    m_incoming_traffic_stats->print(fout); 
 }
@@ -480,7 +479,11 @@ void shader_core_stats::visualizer_print( gzFile visualizer_file )
     gzprintf(visualizer_file, " %d", (shader_cycle_distro[2] - last_shader_cycle_distro[2]) / cf );
     gzprintf(visualizer_file, " %d", (shader_cycle_distro[35] - last_shader_cycle_distro[35]) / cf );
     gzprintf(visualizer_file, " %d", (shader_cycle_distro[36] - last_shader_cycle_distro[36]) / cf );
-    for (unsigned i=0; i<m_config->warp_size+5; i++) {
+    gzprintf(visualizer_file, " %d", (shader_cycle_distro[37] - last_shader_cycle_distro[37]) / cf );
+    gzprintf(visualizer_file, " %d", (shader_cycle_distro[38] - last_shader_cycle_distro[38]) / cf );
+    gzprintf(visualizer_file, " %d", (shader_cycle_distro[39] - last_shader_cycle_distro[39]) / cf );
+    gzprintf(visualizer_file, " %d", (shader_cycle_distro[40] - last_shader_cycle_distro[40]) / cf );
+    for (unsigned i=0; i<m_config->warp_size+9; i++) {
        if ( i>=3 && i<=34 ) {
           total += (shader_cycle_distro[i] - last_shader_cycle_distro[i]);
           if ( ((i-3) % (m_config->warp_size/8)) == ((m_config->warp_size/8)-1) ) {
@@ -968,6 +971,7 @@ void scheduler_unit::cycle()
         unsigned checked=0;
         unsigned issued=0;
         unsigned max_issue = m_shader->m_config->gpgpu_max_insn_issue_per_warp;
+	//printf("Inorder\n");
         while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() && (checked < max_issue) && (checked <= issued) && (issued < max_issue) ) {
             const warp_inst_t *pI = warp(warp_id).ibuffer_next_inst();
             bool valid = warp(warp_id).ibuffer_next_valid();
@@ -985,6 +989,7 @@ void scheduler_unit::cycle()
                     // control hazard
                     warp(warp_id).set_next_pc(pc);
                     warp(warp_id).set_next_fetch_pc(pc);
+		    //printf("Here1\n");
                     warp(warp_id).ibuffer_flush();
                     warp(warp_id).clear_decode();
                 } else {
@@ -1033,6 +1038,7 @@ void scheduler_unit::cycle()
                               (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
                 warp(warp_id).set_next_pc(pc);
                 warp(warp_id).set_next_fetch_pc(pc);
+		//printf("Here2\n");
                 warp(warp_id).ibuffer_flush();
                 warp(warp_id).clear_decode();
             }
@@ -1063,14 +1069,13 @@ void scheduler_unit::cycle()
     }
 
 
-    
-
     if(!issued_inst)
     {
          // of these we issued one    
         /////////////////////////////////////////////////////////////////////////////////////////////////////
         // Find the OoO instruction from the warp given that an OoO instruction is not previously executed //
         /////////////////////////////////////////////////////////////////////////////////////////////////////
+	//printf("Ooorder1\n");
         for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
           iter != m_next_cycle_prioritized_warps.end();
           iter++ ) 
@@ -1093,9 +1098,11 @@ void scheduler_unit::cycle()
                 // Get the top of the stack
                 m_simt_stack[warp_id]->get_pdom_stack_top_info(&pc,&rpc);
                 // printf("Here1\n");
-                const warp_inst_t *pI_orig = warp(warp_id).ibuffer_next_inst_OoO();  // PC of the next instruction
+                printf("Round 1 warp id- %d\n", warp(warp_id).get_warp_id());
+                const warp_inst_t *pI_orig = warp(warp_id).ibuffer_next_inst_OoO(1);  // PC of the next instruction
                 // printf("Here2\n");
                 const warp_inst_t *pI = warp(warp_id).OoO_inst;  // PC of the OoO instruction
+
 
                 // Checked the validity while checking for pI (just above)
                 bool warp_inst_issued = false;
@@ -1106,6 +1113,9 @@ void scheduler_unit::cycle()
                     if( pI ) 
                     {
                         //printf("************PC:%i,RPC:%i\n",pc,rpc);
+			//a = warp(warp_id).m_OoO_count[0];
+                        //b = warp(warp_id).m_OoO_count[1];
+                        //c = warp(warp_id).m_OoO_count[2];
                         valid_inst = true;
                         // Check for data hazard and branch instruction, Also we need to check with the stalled instruction for dependence
                         if ( !m_scoreboard->checkCollision(warp_id, pI) ) {
@@ -1163,7 +1173,7 @@ void scheduler_unit::cycle()
                 else
                     warp(warp_id).revert_to_in_order();
                 checked++;
-            }
+        }
         //}
 
 
@@ -1186,6 +1196,138 @@ void scheduler_unit::cycle()
             } 
         }
     }
+
+
+
+    if(!issued_inst)
+    {
+         // of these we issued one    
+        /////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Find the OoO instruction from the warp given that an OoO instruction is not previously executed //
+        /////////////////////////////////////////////////////////////////////////////////////////////////////
+	//printf("Ooorder2\n");
+        for ( std::vector< shd_warp_t* >::const_iterator iter = m_next_cycle_prioritized_warps.begin();
+          iter != m_next_cycle_prioritized_warps.end();
+          iter++ ) 
+        {
+            // Don't consider warps that are not yet valid
+            if ( (*iter) == NULL || (*iter)->done_exit() ) {
+                continue;
+            }
+            SCHED_DPRINTF( "Testing (warp_id %u, dynamic_warp_id %u)\n",
+                       (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+            unsigned warp_id = (*iter)->get_warp_id();
+            unsigned checked=0;
+            unsigned issued=0;
+            unsigned max_issue = m_shader->m_config->gpgpu_max_insn_issue_per_warp;
+            // Instruction buffer of warp is not empty && We can issue new instruction
+            while( !warp(warp_id).waiting() && !warp(warp_id).ibuffer_empty() && (checked < max_issue) && (checked <= issued) && (issued < max_issue) && !(warp(warp_id).isOoO) ) {
+                // This also checks for the possible scoreboard collision with all the previous instructions
+
+                unsigned pc,rpc;
+                // Get the top of the stack
+                m_simt_stack[warp_id]->get_pdom_stack_top_info(&pc,&rpc);
+                // printf("Here1\n");
+                printf("Round 2 warp id - %d\n", warp(warp_id).get_warp_id());
+                const warp_inst_t *pI_orig = warp(warp_id).ibuffer_next_inst_OoO((warp(warp_id).m_OoO)+1);  // PC of the next instruction
+                // printf("Here2\n");
+                const warp_inst_t *pI = warp(warp_id).OoO_inst;  // PC of the OoO instruction
+
+
+                // Checked the validity while checking for pI (just above)
+                bool warp_inst_issued = false;
+                // Check if the instruction is not a branch instruction (Checked in ibuffer_next_inst_OoO)
+                       // printf("############PC:%i,RPC:%i\n",pc,rpc);                
+                if(pI_orig && pI->pc < rpc && m_shader->check_not_exit(pI,warp_id))
+                {   
+                    if( pI ) 
+                    {
+                        //printf("************PC:%i,RPC:%i\n",pc,rpc);
+			//a = warp(warp_id).m_OoO_count[0];
+                        //b = warp(warp_id).m_OoO_count[1];
+                        //c = warp(warp_id).m_OoO_count[2];
+                        valid_inst = true;
+                        // Check for data hazard and branch instruction, Also we need to check with the stalled instruction for dependence
+                        if ( !m_scoreboard->checkCollision(warp_id, pI) ) {
+                            SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) passes scoreboard\n",
+                                    (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+                            ready_inst = true;
+                            const active_mask_t &active_mask = m_simt_stack[warp_id]->get_active_mask();
+                            assert( warp(warp_id).inst_in_pipeline() );
+                            // Find the type of instruction and execute accordingly
+                            if ( (pI->op == LOAD_OP) || (pI->op == STORE_OP) || (pI->op == MEMORY_BARRIER_OP) ) 
+                            {
+                                if( m_mem_out->has_free() ) {
+                                    m_shader->issue_warp_OoO(*m_mem_out,pI_orig,pI,active_mask,warp_id);
+                                    issued++;
+				                    ooo_inst=true;
+                                    issued_inst = true;
+                                    warp_inst_issued = true;
+                                }
+                            } 
+                            else 
+                            {
+                                bool sp_pipe_avail = m_sp_out->has_free();
+                                bool sfu_pipe_avail = m_sfu_out->has_free();
+                                if( sp_pipe_avail && (pI->op != SFU_OP) ) {
+                                    // always prefer SP pipe for operations that can use both SP and SFU pipelines
+                                    m_shader->issue_warp_OoO(*m_sp_out,pI_orig,pI,active_mask,warp_id);
+                                    issued++;
+				                    ooo_inst=true;
+                                    issued_inst = true;
+                                    warp_inst_issued = true;
+                                } else if ( (pI->op == SFU_OP) || (pI->op == ALU_SFU_OP) ) {
+                                    if( sfu_pipe_avail ) {
+                                        m_shader->issue_warp_OoO(*m_sfu_out,pI_orig,pI,active_mask,warp_id);
+                                        issued++;
+					                    ooo_inst=true;
+                                        issued_inst = true;
+                                        warp_inst_issued = true;
+                                    }
+                                }
+                            }
+                        } else {
+                            SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) fails scoreboard\n",
+                            (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id() );
+                        }
+                    }    
+                }
+                
+                if(warp_inst_issued) {
+                    SCHED_DPRINTF( "Warp (warp_id %u, dynamic_warp_id %u) issued %u instructions\n",
+                                (*iter)->get_warp_id(),
+                                (*iter)->get_dynamic_warp_id(),
+                                issued );
+                    do_on_warp_issued_OoO( warp_id, issued, iter );
+                }
+                else
+                    warp(warp_id).revert_to_in_order();
+                checked++;
+        }
+        //}
+
+
+
+            // If an instruction is issued we stop checking for the new warp to issue instruction
+            if ( issued ) {
+                // This might be a bit inefficient, but we need to maintain
+                // two ordered list for proper scheduler execution.
+                // We could remove the need for this loop by associating a
+                // supervised_is index with each entry in the m_next_cycle_prioritized_warps
+                // vector. For now, just run through until you find the right warp_id
+                for ( std::vector< shd_warp_t* >::const_iterator supervised_iter = m_supervised_warps.begin();
+                    supervised_iter != m_supervised_warps.end();
+                    ++supervised_iter ) {
+                    if ( *iter == *supervised_iter ) {
+                        m_last_supervised_issued = supervised_iter;
+                    }
+                }
+                break;
+            } 
+        }
+    }
+
+
     // issue stall statistics:
     if( !valid_inst ) 
         m_stats->shader_cycle_distro[0]++; // idle or control hazard

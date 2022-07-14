@@ -1344,6 +1344,13 @@ void gpgpu_sim::cycle()
       try_snap_shot(gpu_sim_cycle);
       spill_log_to_file (stdout, 0, gpu_sim_cycle);
    }
+/*    if((gpu_tot_sim_cycle + gpu_sim_cycle) >= 500000)	//soumya
+	{
+		printf("Before abort");
+		print_stats();
+		abort();
+	}  */
+
 }
 
 

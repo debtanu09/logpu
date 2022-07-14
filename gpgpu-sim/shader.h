@@ -41,6 +41,8 @@
 #include <utility>
 #include <algorithm>
 #include <deque>
+#include <iostream>
+#include <fstream>
 
 //#include "../cuda-sim/ptx.tab.h"
 
@@ -110,7 +112,8 @@ public:
         m_fill=0;
         m_inst_at_barrier=NULL;
         isOoO = false;
-        OoO_inst = NULL;
+	OoO_inst = NULL;
+	//m_offset=0;
         flush_flag=false;
         dont_decode=false;
     }
@@ -131,7 +134,8 @@ public:
         m_active_threads = active;
         m_done_exit=false;
         isOoO = false;
-        OoO_inst = NULL;
+	OoO_inst = NULL;
+	//m_offset=0;
         dont_decode=false;
         m_fill=0;
         m_next=0;
@@ -226,7 +230,9 @@ public:
     }
     const warp_inst_t *ibuffer_next_inst() { return m_ibuffer[m_next].m_inst; }
     bool ibuffer_next_valid() { return m_ibuffer[m_next].m_valid; }
-    const warp_inst_t *ibuffer_next_inst_OoO()
+   
+
+const warp_inst_t *ibuffer_next_inst_OoO(unsigned int a)
     {
         if(isOoO)
         {
@@ -235,7 +241,7 @@ public:
         }
         if(m_ibuffer[m_next].m_valid)
         {
-            for (unsigned int i = 1; i < IBUFFER_SIZE /**&& m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_inst->op <= 5*/; i++)
+            for (unsigned int i = a; i < IBUFFER_SIZE /**&& m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_inst->op <= 5*/; i++)
             {
                 bool noCollision = true;
                 if(m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_valid)
@@ -243,7 +249,7 @@ public:
                     inst2 = m_ibuffer[(m_next+i)%IBUFFER_SIZE].m_inst;
                     if(inst2)
                     {
-                        if(inst2->op <= 4 /*&& inst2->op == 5*/ )
+                        if(inst2->op <= 4)
                         {
                             // Get list of all input and output registers (Checking for collision)
                             std::set<int> inst1_regs;
@@ -329,10 +335,11 @@ public:
                             }
                             if(noCollision == true)
                             {
-                                isOoO = true;
-                                m_OoO = (m_next+i)%IBUFFER_SIZE;
-                                OoO_inst = m_ibuffer[m_OoO].m_inst;
-                                return m_ibuffer[m_next].m_inst;        // We return the original value
+				                isOoO = true;
+                                m_OoO= (m_next+i)%IBUFFER_SIZE;
+                                printf("offset - %d\n", m_OoO);
+                                OoO_inst = m_ibuffer[m_OoO].m_inst;					
+	                            return m_ibuffer[m_next].m_inst;        // We return the original value
                             }
                             inst1_regs.clear();
                             inst2_regs.clear();
@@ -352,6 +359,7 @@ public:
         //OoO_inst = NULL;
         return NULL; 
     }
+
     void ibuffer_free()
     {
         // printf("0:%i,1:%i,2:%i,3:%i,4:%i,5:%i,6:%i,7:%i,m_next:%i,m_fill:%i,isOoO:%i,m_OoO:%i\n",m_ibuffer[0].m_valid,m_ibuffer[1].m_valid,m_ibuffer[2].m_valid,m_ibuffer[3].m_valid,m_ibuffer[4].m_valid,m_ibuffer[5].m_valid,m_ibuffer[6].m_valid,m_ibuffer[7].m_valid,m_next,m_fill,isOoO,m_OoO);
@@ -464,6 +472,7 @@ public:
     const class inst_t *inst2;
     const class inst_t *inst1;
     unsigned m_OoO;
+    //unsigned m_offset;
 };
 
 
